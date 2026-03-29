@@ -1,0 +1,519 @@
+# Adapted Snakemake workflow for TE feature extraction from transcript FASTA files
+# Designed for gencode.v47.pc_transcripts.fa and gencode.v47.lncRNA_transcripts.fa
+# MODIFIED: Complete rewrite for transcript-based analysis
+# Author: Generated for bioinformatics pipeline
+# Date: 2025-11-06
+
+import os
+from pathlib import Path
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+configfile: "config_transcripts.yaml"
+
+# ============================================================================
+# Global variables
+# ============================================================================
+
+OUTPUT_DIR = config.get("output_dir", "results/te_analysis_transcripts")
+THREADS = config.get("threads", 4)
+
+# Input files - MODIFIED: Now using transcript FASTA files
+PC_TRANSCRIPTS_FA = config["pc_transcripts_fasta"]  # gencode.v47.pc_transcripts.fa
+LNCRNA_TRANSCRIPTS_FA = config["lncrna_transcripts_fasta"]  # gencode.v47.lncRNA_transcripts.fa
+GENCODE_GTF = config.get("gencode_gtf", "")  # Optional, for regional analysis
+
+# RepeatMasker parameters
+RM_SPECIES = config.get("repeatmasker_species", "human")
+RM_LIB = config.get("repeatmasker_lib", "dfam")
+
+# ============================================================================
+# Target rules
+# ============================================================================
+
+rule all:
+    input:
+        # Annotation outputs for both transcript types - MODIFIED
+        f"{OUTPUT_DIR}/repeatmasker/pc_transcripts.out.gff",
+        f"{OUTPUT_DIR}/repeatmasker/lncrna_transcripts.out.gff",
+
+        # Feature extraction outputs - MODIFIED
+        f"{OUTPUT_DIR}/features/pc_transcripts_te_features.csv",
+        f"{OUTPUT_DIR}/features/pc_transcripts_te_summary.txt",
+        f"{OUTPUT_DIR}/features/lncrna_transcripts_te_features.csv",
+        f"{OUTPUT_DIR}/features/lncrna_transcripts_te_summary.txt",
+
+        # Regional features (if GTF provided) - MODIFIED
+        f"{OUTPUT_DIR}/features/pc_transcripts_regional_te_features.csv",
+        f"{OUTPUT_DIR}/features/lncrna_transcripts_regional_te_features.csv",
+
+        # Combined analysis - MODIFIED
+        f"{OUTPUT_DIR}/combined/all_transcripts_te_features.csv",
+
+        # Statistical analysis
+        f"{OUTPUT_DIR}/analysis/univariate_tests.csv",
+        f"{OUTPUT_DIR}/analysis/pca_scores.csv",
+        f"{OUTPUT_DIR}/analysis/feature_importance.csv",
+        f"{OUTPUT_DIR}/analysis/summary_report.txt",
+
+        # Visualizations
+        f"{OUTPUT_DIR}/plots/te_presence_comparison.png",
+        f"{OUTPUT_DIR}/plots/volcano_plot.png",
+        f"{OUTPUT_DIR}/plots/pca_plot.png",
+
+# ============================================================================
+# Step 1: Prepare transcript FASTA index (quality control)
+# ============================================================================
+
+rule index_transcript_fasta:
+    """Index transcript FASTA files for quick access."""
+    input:
+        fasta = "{fasta_file}"
+    output:
+        fai = "{fasta_file}.fai"
+    shell:
+        """
+        samtools faidx {input.fasta}
+        """
+
+rule index_pc_transcripts:
+    input:
+        fasta = PC_TRANSCRIPTS_FA
+    output:
+        fai = f"{PC_TRANSCRIPTS_FA}.fai"
+    shell:
+        """
+        samtools faidx {input.fasta}
+        """
+
+rule index_lncrna_transcripts:
+    input:
+        fasta = LNCRNA_TRANSCRIPTS_FA
+    output:
+        fai = f"{LNCRNA_TRANSCRIPTS_FA}.fai"
+    shell:
+        """
+        samtools faidx {input.fasta}
+        """
+
+# ============================================================================
+# Step 2: Extract transcript coordinates from FASTA headers
+# ============================================================================
+
+rule extract_transcript_bed_from_fasta:
+    """Extract transcript coordinates from FASTA file into BED format."""
+    input:
+        fasta = "{fasta_file}"
+    output:
+        bed = "{output_dir}/annotation/{transcript_type}_transcripts.bed"
+    params:
+        transcript_type = "{transcript_type}"
+    shell:
+        """
+        # Extract from FASTA headers: seq_id length count in_db
+        # Format: >ENST00000456328.2|ENSG00000223972.5|OTTHUMG00000000961.2|OTTHUMT00000362751.1|DDX11L1-202|DDX11L1|1657|PAR|
+        # Extract transcript ID and create BED entry
+        grep "^>" {input.fasta} | \
+            sed 's/^>//g' | \
+            awk 'BEGIN {{OFS="\t"}} {{
+                split($0, a, "|");
+                tx_id = a[1];
+                split(tx_id, b, "\.");
+                print b[1], 0, a[7], b[1], 0, "+", a[7]
+            }}' > {output.bed}
+        """
+
+rule extract_pc_transcript_bed:
+    input:
+        fasta = PC_TRANSCRIPTS_FA
+    output:
+        bed = f"{OUTPUT_DIR}/annotation/pc_transcripts.bed"
+    shell:
+        """
+        grep "^>" {input.fasta} | \
+            sed 's/^>//g' | \
+            awk 'BEGIN {{OFS="\t"}} {{
+                split($0, a, "|");
+                tx_id = a[1];
+                split(tx_id, b, "\.");
+                print b[1], 0, a[7], b[1], 0, "+", a[7]
+            }}' > {output.bed}
+        """
+
+rule extract_lncrna_transcript_bed:
+    input:
+        fasta = LNCRNA_TRANSCRIPTS_FA
+    output:
+        bed = f"{OUTPUT_DIR}/annotation/lncrna_transcripts.bed"
+    shell:
+        """
+        grep "^>" {input.fasta} | \
+            sed 's/^>//g' | \
+            awk 'BEGIN {{OFS="\t"}} {{
+                split($0, a, "|");
+                tx_id = a[1];
+                split(tx_id, b, "\.");
+                print b[1], 0, a[7], b[1], 0, "+", a[7]
+            }}' > {output.bed}
+        """
+
+# ============================================================================
+# Step 3: Run RepeatMasker on transcript sequences - MODIFIED
+# ============================================================================
+
+rule run_repeatmasker_on_transcripts:
+    """Run RepeatMasker on transcript FASTA files (faster than genome)."""
+    input:
+        fasta = "{fasta_file}",
+        index = "{fasta_file}.fai"
+    output:
+        gff = "{output_dir}/repeatmasker/{prefix}.out.gff",
+        out = "{output_dir}/repeatmasker/{prefix}.out",
+        masked = "{output_dir}/repeatmasker/{prefix}.masked"
+    params:
+        species = RM_SPECIES,
+        outdir = "{output_dir}/repeatmasker",
+        prefix = "{prefix}"
+    threads: THREADS
+    log:
+        "{output_dir}/logs/repeatmasker_{prefix}.log"
+    shell:
+        """
+        RepeatMasker \
+            -species {params.species} \
+            -pa {threads} \
+            -gff \
+            -dir {params.outdir} \
+            -s \
+            {input.fasta} \
+            2>&1 | tee {log}
+
+        # Rename outputs to standardized names
+        mv {params.outdir}/$(basename {input.fasta}).out.gff {output.gff}
+        mv {params.outdir}/$(basename {input.fasta}).out {output.out}
+        mv {params.outdir}/$(basename {input.fasta}).masked {output.masked}
+        """
+
+rule repeatmasker_pc_transcripts:
+    input:
+        fasta = PC_TRANSCRIPTS_FA,
+        index = f"{PC_TRANSCRIPTS_FA}.fai"
+    output:
+        gff = f"{OUTPUT_DIR}/repeatmasker/pc_transcripts.out.gff",
+        out = f"{OUTPUT_DIR}/repeatmasker/pc_transcripts.out",
+        masked = f"{OUTPUT_DIR}/repeatmasker/pc_transcripts.masked"
+    params:
+        species = RM_SPECIES,
+        outdir = f"{OUTPUT_DIR}/repeatmasker"
+    threads: THREADS
+    log:
+        f"{OUTPUT_DIR}/logs/repeatmasker_pc_transcripts.log"
+    shell:
+        """
+        RepeatMasker \
+            -species {params.species} \
+            -pa {threads} \
+            -gff \
+            -dir {params.outdir} \
+            -s \
+            {input.fasta} \
+            2>&1 | tee {log}
+
+        mv {params.outdir}/$(basename {input.fasta}).out.gff {output.gff}
+        mv {params.outdir}/$(basename {input.fasta}).out {output.out}
+        mv {params.outdir}/$(basename {input.fasta}).masked {output.masked}
+        """
+
+rule repeatmasker_lncrna_transcripts:
+    input:
+        fasta = LNCRNA_TRANSCRIPTS_FA,
+        index = f"{LNCRNA_TRANSCRIPTS_FA}.fai"
+    output:
+        gff = f"{OUTPUT_DIR}/repeatmasker/lncrna_transcripts.out.gff",
+        out = f"{OUTPUT_DIR}/repeatmasker/lncrna_transcripts.out",
+        masked = f"{OUTPUT_DIR}/repeatmasker/lncrna_transcripts.masked"
+    params:
+        species = RM_SPECIES,
+        outdir = f"{OUTPUT_DIR}/repeatmasker"
+    threads: THREADS
+    log:
+        f"{OUTPUT_DIR}/logs/repeatmasker_lncrna_transcripts.log"
+    shell:
+        """
+        RepeatMasker \
+            -species {params.species} \
+            -pa {threads} \
+            -gff \
+            -dir {params.outdir} \
+            -s \
+            {input.fasta} \
+            2>&1 | tee {log}
+
+        mv {params.outdir}/$(basename {input.fasta}).out.gff {output.gff}
+        mv {params.outdir}/$(basename {input.fasta}).out {output.out}
+        mv {params.outdir}/$(basename {input.fasta}).masked {output.masked}
+        """
+
+# ============================================================================
+# Step 4: Extract TE features - MODIFIED
+# ============================================================================
+
+rule extract_te_features_from_repeatmasker:
+    """Extract TE features from transcript-based RepeatMasker output."""
+    input:
+        repeatmasker = f"{OUTPUT_DIR}/repeatmasker/{{prefix}}.out.gff",
+        transcript_bed = f"{OUTPUT_DIR}/annotation/{{prefix}}.bed"
+    output:
+        features = f"{OUTPUT_DIR}/features/{{prefix}}_te_features.csv",
+        summary = f"{OUTPUT_DIR}/features/{{prefix}}_te_summary.txt"
+    params:
+        transcript_type = "{prefix}",
+        output_prefix = f"{OUTPUT_DIR}/features/{{prefix}}"
+    log:
+        f"{OUTPUT_DIR}/logs/te_features_{{prefix}}.log"
+    shell:
+        """
+        python scripts/te_feature_extractor_transcripts.py \
+            --repeatmasker {input.repeatmasker} \
+            --transcripts {input.transcript_bed} \
+            --transcript-type {params.transcript_type} \
+            --output-prefix {params.output_prefix} \
+            2>&1 | tee {log}
+        """
+
+rule extract_pc_features:
+    input:
+        repeatmasker = f"{OUTPUT_DIR}/repeatmasker/pc_transcripts.out.gff",
+        transcript_bed = f"{OUTPUT_DIR}/annotation/pc_transcripts.bed"
+    output:
+        features = f"{OUTPUT_DIR}/features/pc_transcripts_te_features.csv",
+        summary = f"{OUTPUT_DIR}/features/pc_transcripts_te_summary.txt"
+    log:
+        f"{OUTPUT_DIR}/logs/te_features_pc.log"
+    shell:
+        """
+        python scripts/te_feature_extractor_transcripts.py \
+            --repeatmasker {input.repeatmasker} \
+            --transcripts {input.transcript_bed} \
+            --transcript-type "pc_transcripts" \
+            --output-prefix {OUTPUT_DIR}/features/pc_transcripts \
+            2>&1 | tee {log}
+        """
+
+rule extract_lncrna_features:
+    input:
+        repeatmasker = f"{OUTPUT_DIR}/repeatmasker/lncrna_transcripts.out.gff",
+        transcript_bed = f"{OUTPUT_DIR}/annotation/lncrna_transcripts.bed"
+    output:
+        features = f"{OUTPUT_DIR}/features/lncrna_transcripts_te_features.csv",
+        summary = f"{OUTPUT_DIR}/features/lncrna_transcripts_te_summary.txt"
+    log:
+        f"{OUTPUT_DIR}/logs/te_features_lncrna.log"
+    shell:
+        """
+        python scripts/te_feature_extractor_transcripts.py \
+            --repeatmasker {input.repeatmasker} \
+            --transcripts {input.transcript_bed} \
+            --transcript-type "lncrna_transcripts" \
+            --output-prefix {OUTPUT_DIR}/features/lncrna_transcripts \
+            2>&1 | tee {log}
+        """
+
+# ============================================================================
+# Step 5: Extract regional TE features (optional, requires GTF)
+# ============================================================================
+
+rule extract_regional_features:
+    """Extract regional features if GENCODE GTF is provided."""
+    input:
+        repeatmasker = f"{OUTPUT_DIR}/repeatmasker/{{prefix}}.out.gff",
+        gencode_gtf = GENCODE_GTF if GENCODE_GTF else "/dev/null"
+    output:
+        features = f"{OUTPUT_DIR}/features/{{prefix}}_regional_te_features.csv"
+    log:
+        f"{OUTPUT_DIR}/logs/regional_features_{{prefix}}.log"
+    shell:
+        """
+        if [ -f "{input.gencode_gtf}" ] && [ "{input.gencode_gtf}" != "/dev/null" ]; then
+            python scripts/regional_te_extractor_transcripts.py \
+                --repeatmasker {input.repeatmasker} \
+                --gencode-gtf {input.gencode_gtf} \
+                --transcript-type {{wildcards.prefix}} \
+                --output-prefix {OUTPUT_DIR}/features/{{wildcards.prefix}} \
+                2>&1 | tee {log}
+        else
+            echo "GTF file not provided, skipping regional analysis" > {log}
+            touch {output.features}
+        fi
+        """
+
+rule regional_pc_features:
+    input:
+        repeatmasker = f"{OUTPUT_DIR}/repeatmasker/pc_transcripts.out.gff",
+        gencode_gtf = GENCODE_GTF if GENCODE_GTF else "/dev/null"
+    output:
+        features = f"{OUTPUT_DIR}/features/pc_transcripts_regional_te_features.csv"
+    log:
+        f"{OUTPUT_DIR}/logs/regional_features_pc.log"
+    shell:
+        """
+        if [ -f "{input.gencode_gtf}" ] && [ "{input.gencode_gtf}" != "/dev/null" ]; then
+            python scripts/regional_te_extractor_transcripts.py \
+                --repeatmasker {input.repeatmasker} \
+                --gencode-gtf {input.gencode_gtf} \
+                --transcript-type "pc_transcripts" \
+                --output-prefix {OUTPUT_DIR}/features/pc_transcripts \
+                2>&1 | tee {log}
+        else
+            echo "GTF file not provided, skipping regional analysis" > {log}
+            touch {output.features}
+        fi
+        """
+
+rule regional_lncrna_features:
+    input:
+        repeatmasker = f"{OUTPUT_DIR}/repeatmasker/lncrna_transcripts.out.gff",
+        gencode_gtf = GENCODE_GTF if GENCODE_GTF else "/dev/null"
+    output:
+        features = f"{OUTPUT_DIR}/features/lncrna_transcripts_regional_te_features.csv"
+    log:
+        f"{OUTPUT_DIR}/logs/regional_features_lncrna.log"
+    shell:
+        """
+        if [ -f "{input.gencode_gtf}" ] && [ "{input.gencode_gtf}" != "/dev/null" ]; then
+            python scripts/regional_te_extractor_transcripts.py \
+                --repeatmasker {input.repeatmasker} \
+                --gencode-gtf {input.gencode_gtf} \
+                --transcript-type "lncrna_transcripts" \
+                --output-prefix {OUTPUT_DIR}/features/lncrna_transcripts \
+                2>&1 | tee {log}
+        else
+            echo "GTF file not provided, skipping regional analysis" > {log}
+            touch {output.features}
+        fi
+        """
+
+# ============================================================================
+# Step 6: Combine features - MODIFIED
+# ============================================================================
+
+rule combine_transcript_features:
+    """Combine TE features from both transcript types."""
+    input:
+        pc_features = f"{OUTPUT_DIR}/features/pc_transcripts_te_features.csv",
+        lncrna_features = f"{OUTPUT_DIR}/features/lncrna_transcripts_te_features.csv",
+        pc_regional = f"{OUTPUT_DIR}/features/pc_transcripts_regional_te_features.csv",
+        lncrna_regional = f"{OUTPUT_DIR}/features/lncrna_transcripts_regional_te_features.csv"
+    output:
+        combined = f"{OUTPUT_DIR}/combined/all_transcripts_te_features.csv"
+    run:
+        import pandas as pd
+
+        # Load features
+        pc_df = pd.read_csv(input.pc_features)
+        lncrna_df = pd.read_csv(input.lncrna_features)
+
+        # Add group labels - MODIFIED: based on file source
+        pc_df['group'] = 'Coding'
+        lncrna_df['group'] = 'lncRNA'
+
+        # Concatenate
+        combined = pd.concat([pc_df, lncrna_df], ignore_index=True)
+
+        # Try to merge regional features if they exist
+        try:
+            pc_regional = pd.read_csv(input.pc_regional)
+            if not pc_regional.empty:
+                lncrna_regional = pd.read_csv(input.lncrna_regional)
+
+                pc_regional['group'] = 'Coding'
+                lncrna_regional['group'] = 'lncRNA'
+
+                regional_combined = pd.concat([pc_regional, lncrna_regional],
+                                            ignore_index=True)
+                combined = combined.merge(regional_combined,
+                                         on=['transcript_id', 'group'],
+                                         how='left')
+        except:
+            pass
+
+        # Save
+        combined.to_csv(output.combined, index=False)
+
+# ============================================================================
+# Step 7: Statistical analysis (unchanged)
+# ============================================================================
+
+rule statistical_analysis:
+    """Perform statistical analysis on combined features."""
+    input:
+        features = f"{OUTPUT_DIR}/combined/all_transcripts_te_features.csv"
+    output:
+        univariate = f"{OUTPUT_DIR}/analysis/univariate_tests.csv",
+        categorical = f"{OUTPUT_DIR}/analysis/categorical_tests.csv",
+        pca_scores = f"{OUTPUT_DIR}/analysis/pca_scores.csv",
+        pca_loadings = f"{OUTPUT_DIR}/analysis/pca_loadings.csv",
+        importance = f"{OUTPUT_DIR}/analysis/feature_importance.csv",
+        summary = f"{OUTPUT_DIR}/analysis/summary_report.txt"
+    log:
+        f"{OUTPUT_DIR}/logs/statistical_analysis.log"
+    shell:
+        """
+        python scripts/te_statistical_analyzer.py \
+            --features {input.features} \
+            --output-prefix {OUTPUT_DIR}/analysis \
+            --group-column group \
+            2>&1 | tee {log}
+        """
+
+# ============================================================================
+# Step 8: Visualizations (unchanged)
+# ============================================================================
+
+rule generate_visualizations:
+    """Generate comprehensive visualizations."""
+    input:
+        features = f"{OUTPUT_DIR}/combined/all_transcripts_te_features.csv",
+        tests = f"{OUTPUT_DIR}/analysis/univariate_tests.csv",
+        pca = f"{OUTPUT_DIR}/analysis/pca_scores.csv"
+    output:
+        presence = f"{OUTPUT_DIR}/plots/te_presence_comparison.png",
+        coverage = f"{OUTPUT_DIR}/plots/te_coverage_comparison.png",
+        family = f"{OUTPUT_DIR}/plots/te_family_composition.png",
+        volcano = f"{OUTPUT_DIR}/plots/volcano_plot.png",
+        pca = f"{OUTPUT_DIR}/plots/pca_plot.png"
+    log:
+        f"{OUTPUT_DIR}/logs/visualization.log"
+    shell:
+        """
+        python scripts/te_visualizer.py \
+            --features {input.features} \
+            --test-results {input.tests} \
+            --pca-scores {input.pca} \
+            --output-dir {OUTPUT_DIR}/plots \
+            2>&1 | tee {log}
+        """
+
+# ============================================================================
+# Clean-up rules
+# ============================================================================
+
+rule clean:
+    """Remove all output files except logs."""
+    shell:
+        """
+        rm -rf {OUTPUT_DIR}/repeatmasker
+        rm -rf {OUTPUT_DIR}/features
+        rm -rf {OUTPUT_DIR}/combined
+        rm -rf {OUTPUT_DIR}/analysis
+        rm -rf {OUTPUT_DIR}/plots
+        """
+
+rule clean_all:
+    """Remove all output including logs."""
+    shell:
+        """
+        rm -rf {OUTPUT_DIR}
+        """

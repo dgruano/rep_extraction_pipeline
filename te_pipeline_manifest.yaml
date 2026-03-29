@@ -1,0 +1,363 @@
+# te_pipeline_manifest.yaml
+#
+# Reusable manifest of the TE analysis Snakemake pipeline.
+# Captures entry points, rules, output patterns, scripts, and known bugs.
+#
+# Both humans and machines can consume this file:
+#   import yaml; m = yaml.safe_load(open("te_pipeline_manifest.yaml"))
+#   m["entry_points"]   → runnable entry points
+#   m["modules"]        → per-file rule catalogue
+#   m["scripts"]        → workflow/scripts catalogue
+#   m["known_bugs"]     → actionable issues before next run
+
+meta:
+  project: TE_Pipeline
+  description: >
+    Snakemake pipeline that runs RepeatMasker on GENCODE transcripts,
+    extracts TE features for each transcript, and compares feature distributions
+    between protein-coding and lncRNA classes via statistical tests and plots.
+  last_updated: "2026-03-28"
+  conda_env:   workflow/envs/te_analysis.yaml
+  configs:
+    flexible:    config/config_flexible.yaml   # default template (v47, fasta mode)
+    gencode_v47: config/config_47.yaml
+    gencode_v49: config/config_49.yaml
+    genome:      config/config_genome.yaml
+    transcripts: config/config_transcripts.yaml
+    rnachallenge: config/config_rnachallenge.yaml
+    legacy:      config/config.yaml            # undocumented legacy config, present in repo
+
+# ---------------------------------------------------------------------------
+# Entry points — top-level Snakefiles you can run directly
+# ---------------------------------------------------------------------------
+entry_points:
+  flexible_pipeline:
+    file:        Snakefile.smk
+    config:      config/config_flexible.yaml   # or config_47.yaml / config_49.yaml
+    target_rule: all
+    status:      active
+    description: >
+      End-to-end pipeline: GTF parsing → transcript extraction → RepeatMasker →
+      TE feature extraction → statistical analysis → visualizations.
+      Supports two classification modes: 'fasta' (separate FASTA per class)
+      or 'id_file' (plain-text transcript ID lists).
+    run_with: >
+      snakemake --snakefile Snakefile.smk
+                --configfile config/config_49.yaml
+                --profile profiles/default
+    datasets_used:
+      - gencode.v47    # results from config_47.yaml
+      - gencode.v49    # results from config_49.yaml
+
+# ---------------------------------------------------------------------------
+# Include graph — this pipeline is a single flat file; no includes
+# ---------------------------------------------------------------------------
+include_graph: {}
+
+# ---------------------------------------------------------------------------
+# Modules — per-file rule catalogue
+# ---------------------------------------------------------------------------
+modules:
+
+  flexible_snakefile:
+    file:        Snakefile.smk
+    status:      active
+    role:        full_te_analysis_pipeline
+    entry_rule:  all
+    wildcards:   [dataset]
+    configfile:  config/config_flexible.yaml
+    rules:
+
+      - name:   all
+        type:   aggregation
+        output: >
+          results/{dataset}/analysis/summary_report.txt
+          results/{dataset}/plots/te_presence_comparison.png
+
+      - name:   parse_gencode_gtf
+        type:   data_prep
+        step:   1
+        description: "Parse GENCODE GTF → transcript BED + biotype table"
+        output:
+          bed:      "results/{dataset}/annotation/transcripts_from_gtf.bed"
+          biotypes: "results/{dataset}/annotation/transcript_biotypes.txt"
+        script: workflow/scripts/parse_gencode_gtf.py
+        resources: { mem_mb: 16000 }
+
+      - name:   extract_transcript_lengths
+        type:   data_prep
+        step:   1.5
+        description: "Compute spliced transcript lengths from GTF exon records via awk"
+        output:
+          lengths: "results/{dataset}/annotation/transcript_lengths.txt"
+        resources: { mem_mb: 16000 }
+
+      - name:   extract_ids_from_fasta
+        type:   data_prep
+        step:   2
+        description: >
+          FASTA mode: grep FASTA headers → pc/lncrna ID lists.
+          ID-file mode: copy supplied ID files.
+        output:
+          pc_ids:     "results/{dataset}/annotation/pc_transcript_ids.txt"
+          lncrna_ids: "results/{dataset}/annotation/lncrna_transcript_ids.txt"
+
+      - name:   index_transcripts
+        type:   data_prep
+        step:   4
+        description: "samtools faidx on the transcript FASTA"
+        output:
+          fai: "results/{dataset}/annotation/all_transcripts.fa.fai"
+
+      - name:   check_fasta_headers
+        type:   data_prep
+        step:   5
+        description: "Clean FASTA headers for RepeatMasker compatibility"
+        output:
+          cleaned_fa: "results/{dataset}/annotation/all_transcripts_headers_checked.fa"
+        script: workflow/scripts/check_fasta_headers.py
+
+      - name:   run_repeatmasker_full
+        type:   processing
+        step:   5
+        description: "Run RepeatMasker on all transcripts (slow, ~3 days)"
+        output:
+          gff: "results/{dataset}/repeatmasker/all_transcripts.out.gff"
+          out: "results/{dataset}/repeatmasker/all_transcripts.out"
+        resources: { mem_mb: 200000, runtime: "3d" }
+        note: >
+          Bug: subpath() is called for outdir computation but is not defined
+          anywhere in the file. See known_bug 'undefined_subpath_function'.
+
+      - name:   extract_all_features
+        type:   processing
+        step:   6
+        description: "Parse RepeatMasker .out → per-transcript TE feature matrix"
+        output:
+          features: "results/{dataset}/features/all_transcripts_te_features.csv"
+          summary:  "results/{dataset}/features/all_transcripts_te_summary.txt"
+        script: workflow/scripts/te_feature_extractor_refactored.py
+
+      - name:   filter_features_by_class
+        type:   processing
+        step:   7
+        description: "Split full feature matrix into coding and lncRNA subsets"
+        output:
+          pc_features:     "results/{dataset}/features/pc_transcripts_te_features.csv"
+          lncrna_features: "results/{dataset}/features/lncrna_transcripts_te_features.csv"
+        script: workflow/scripts/filter_features_by_class.py
+
+      - name:   combine_classified_features
+        type:   processing
+        step:   8
+        description: "Concatenate pc + lncRNA feature frames with 'group' column"
+        output:
+          combined: "results/{dataset}/combined/classified_te_features.csv"
+
+      - name:   statistical_analysis
+        type:   analysis
+        step:   9
+        description: >
+          Mann-Whitney U, KS, chi-square, Fisher, FDR correction, PCA,
+          Random Forest cross-val on TE features
+        output:
+          univariate:         "results/{dataset}/analysis/univariate_tests.csv"
+          categorical:        "results/{dataset}/analysis/categorical_tests.csv"
+          pca_scores:         "results/{dataset}/analysis/pca_scores.csv"
+          summary:            "results/{dataset}/analysis/summary_report.txt"
+          feature_importance: "results/{dataset}/analysis/feature_importance.csv"  # undeclared in rule
+          pca_loadings:       "results/{dataset}/analysis/pca_loadings.csv"        # undeclared in rule
+          pca_variance:       "results/{dataset}/analysis/pca_variance.csv"        # undeclared in rule
+        note: >
+          feature_importance.csv, pca_loadings.csv, and pca_variance.csv are
+          written by te_statistical_analyzer.py but NOT declared in the Snakemake
+          rule's output block — Snakemake will not track them for re-runs.
+        script: workflow/scripts/te_statistical_analyzer.py
+
+      - name:   generate_visualizations
+        type:   analysis
+        step:   10
+        description: "TE presence bar chart, volcano plot, PCA scatter"
+        output:
+          presence: "results/{dataset}/plots/te_presence_comparison.png"
+          volcano:  "results/{dataset}/plots/volcano_plot.png"
+          pca:      "results/{dataset}/plots/pca_plot.png"
+        script: workflow/scripts/te_visualizer.py
+
+      - name:   clean
+        type:   setup
+        description: "Remove all output files for a dataset"
+
+# ---------------------------------------------------------------------------
+# Scripts — workflow/scripts catalogue (some standalone, some called by rules)
+# ---------------------------------------------------------------------------
+scripts:
+
+  parse_gencode_gtf:
+    file:        workflow/scripts/parse_gencode_gtf.py
+    called_by:   parse_gencode_gtf
+    description: "Parse GENCODE GTF; emit BED file and biotype TSV"
+
+  check_fasta_headers:
+    file:        workflow/scripts/check_fasta_headers.py
+    called_by:   check_fasta_headers
+    description: "Sanitize FASTA headers to RepeatMasker-safe format"
+
+  te_feature_extractor_refactored:
+    file:        workflow/scripts/te_feature_extractor_refactored.py
+    called_by:   extract_all_features
+    description: >
+      Modular TE feature extractor. Parses RepeatMasker .out format,
+      detects overlaps, computes per-transcript features grouped by
+      TE class (LINE, SINE, LTR, DNA), with biotype metadata.
+
+  filter_features_by_class:
+    file:        workflow/scripts/filter_features_by_class.py
+    called_by:   filter_features_by_class
+    description: "Filter full feature CSV to coding / lncRNA subsets by ID lists"
+
+  te_statistical_analyzer:
+    file:        workflow/scripts/te_statistical_analyzer.py
+    called_by:   statistical_analysis
+    description: >
+      Compares TE features between coding_class=='coding' and 'lncRNA'.
+      Tests: Mann-Whitney U, KS, chi-square, Fisher exact, FDR (BH),
+      PCA (StandardScaler + sklearn), Random Forest 5-fold CV AUC.
+
+  te_visualizer:
+    file:        workflow/scripts/te_visualizer.py
+    called_by:   generate_visualizations
+    description: "Generate presence bar chart, volcano, and PCA scatter plots"
+
+  extractor_compare:
+    file:        workflow/scripts/extractor_compare.py
+    called_by:   standalone
+    status:      active
+    description: >
+      Optimized/vectorized TE feature extractor using vectorized operations and
+      efficient groupby. NOT wired to any Snakemake rule. Likely a candidate to
+      replace te_feature_extractor_refactored.py — needs review.
+
+  te_contingency_analyzer:
+    file:        workflow/scripts/te_contingency_analyzer.py
+    called_by:   standalone
+    status:      active
+    description: >
+      Standalone chi-square contingency analysis: TE class / family
+      presence-absence enrichment between coding and lncRNA transcripts.
+      NOT currently wired into the Snakemake DAG.
+
+  annotate_coding_class:
+    file:        workflow/scripts/annotate_coding_class.py
+    called_by:   standalone
+    status:      active
+    description: "Annotate transcripts with coding class from biotype / ID files"
+
+  integrate_features:
+    file:        workflow/scripts/integrate_features.py
+    called_by:   standalone
+    status:      active
+    description: "Merge TE features with external metadata tables"
+
+# ---------------------------------------------------------------------------
+# Wildcards — definitions of all {wildcard} tokens used in rules
+# ---------------------------------------------------------------------------
+wildcards:
+  dataset: >
+    Dataset/GENCODE version identifier used to namespace results.
+    Examples: 'gencode.v47', 'gencode.v49', 'te_analysis_flexible'.
+    Constrained to [a-zA-Z0-9._-]+.
+
+# ---------------------------------------------------------------------------
+# Known bugs — issues that must be resolved before the next pipeline run
+# ---------------------------------------------------------------------------
+known_bugs:
+
+  undefined_subpath_function:
+    rule:     run_repeatmasker_full
+    file:     Snakefile.smk
+    line:     242
+    severity: critical
+    description: >
+      `subpath()` is used as a lambda for `params.outdir` but is never defined
+      in Snakefile.smk or any imported module. The rule will crash at runtime
+      with a NameError before RepeatMasker is called.
+    fix: >
+      Replace with a Path-based expression, e.g.:
+        outdir=lambda wc, output: str(Path(output.gff).parent)
+
+  undeclared_statistical_outputs:
+    rule:     statistical_analysis
+    file:     Snakefile.smk
+    severity: minor
+    description: >
+      te_statistical_analyzer.py writes feature_importance.csv, pca_loadings.csv,
+      and pca_variance.csv to the analysis/ output prefix, but these files are not
+      declared in the rule's output block. Snakemake will not track them as
+      dependencies for downstream rules and will not re-run this rule if they are
+      deleted.
+    fix: >
+      Add the three files to the rule's output block.
+
+# ---------------------------------------------------------------------------
+# Dataset run status — current state of results/ directories
+# ---------------------------------------------------------------------------
+dataset_run_status:
+
+  gencode.v47:
+    status:          partial
+    completed_steps: [parse_gencode_gtf, extract_transcript_lengths, extract_ids_from_fasta,
+                      index_transcripts, check_fasta_headers, run_repeatmasker_full,
+                      extract_all_features, statistical_analysis]
+    missing_outputs: [combined/classified_te_features.csv,
+                      plots/te_presence_comparison.png,
+                      plots/volcano_plot.png,
+                      plots/pca_plot.png]
+    notes: >
+      filter_features_by_class and combine_classified_features were skipped or
+      not run; no combined/ or plots/ directories exist. Statistical analysis
+      completed and wrote undeclared extra outputs (feature_importance, pca_loadings,
+      pca_variance).
+
+  gencode.v49:
+    status:          partial
+    completed_steps: [parse_gencode_gtf, extract_transcript_lengths, extract_ids_from_fasta,
+                      index_transcripts, check_fasta_headers, run_repeatmasker_full,
+                      extract_all_features]
+    missing_outputs: [analysis/, combined/, plots/]
+    notes: >
+      Features extracted; a manually corrected file
+      (all_transcripts_te_features.corrected.csv) exists in features/ — provenance
+      unclear. Statistical analysis and visualizations not yet run.
+
+  rnachallenge:
+    status:          partial
+    completed_steps: [parse_gencode_gtf, extract_ids_from_fasta]
+    missing_outputs: [annotation/transcript_lengths.txt,
+                      annotation/all_transcripts.fa,
+                      repeatmasker/, features/, analysis/, plots/]
+    notes: >
+      Only annotation/ dir exists with ID lists and biotypes.
+      RepeatMasker not yet run.
+
+  te_analysis_flexible:
+    status:          complete
+    completed_steps: all
+    notes: >
+      Full run completed including plots/, analysis/, and contingency analysis
+      (contingency_analysis_report.txt, te_class_chi_square.csv,
+      te_family_chi_square.csv produced by te_contingency_analyzer.py standalone).
+      Includes features.bak/ and repeatmasker.bak/ backup directories.
+
+# ---------------------------------------------------------------------------
+# Leftover artefacts to clean up
+# ---------------------------------------------------------------------------
+cleanup_candidates:
+
+  - path:   RM_528487.MonFeb91035352026/
+    reason: >
+      Temporary RepeatMasker working directory from a run on Mon Feb 9 2026.
+      Contains all_transcripts_headers_checked.fa, .cat.gz, .out, .out.gff.
+      Safe to delete if results/gencode.v49/repeatmasker/ outputs are confirmed
+      complete.
+    action: DELETE after verifying v49 repeatmasker outputs

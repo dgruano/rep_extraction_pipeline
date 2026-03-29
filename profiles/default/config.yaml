@@ -1,0 +1,22 @@
+# filepath: profiles/default/config.yaml
+executor: slurm
+jobs: 30
+keep-going: false
+#rerun-incomplete: true
+printshellcmds: true
+scheduler: greedy
+use-conda: true
+verbose: false
+latency-wait: 20
+benchmark-extended: true
+default_resources:
+  mem_mb_per_cpu: 5000
+consider-ancient:
+  create_toy: fasta
+  run_cpc2: fasta
+  extract_orfs: fasta,cpc2_txt
+slurm-keep-successful-logs: true
+# If I add gpus: 1, no GPUs are requested (gpus is not translated to --gres=gpu:1)
+# If I add gpu: 1, srun: fatal: SLURM_TRES_PER_TASK is mutually exclusive with --ntasks-per-gpu and SLURM_NTASKS_PER_GPU
+# If I add directly slurm_extra: "--gres=gpu:1", I get an error saying that it's the plugin setting this
+# I don't know if the problem was simply that I was setting the number of threads in the rule, and I cannot do this as the parameter cpus_per_gpu comes into play

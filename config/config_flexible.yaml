@@ -1,0 +1,123 @@
+# Configuration - Flexible TE Analysis Pipeline
+# MODIFIED: Supports GTF + flexible classification (FASTA or ID files)
+# Biotype tracking included
+# Author: Generated for bioinformatics pipeline
+# Date: 2025-11-06
+
+# ============================================================================
+# General settings
+# ============================================================================
+
+output_dir: "results/te_analysis_flexible"
+threads: 20
+datasets:
+  - te_analysis_flexible
+
+# ============================================================================
+# REQUIRED: GENCODE annotation
+# ============================================================================
+
+# GENCODE v47 GTF annotation file
+# Download from: https://www.gencodegenes.org/human/release_47.html
+# File: gencode.v47.annotation.gtf or gencode.v47.basic.annotation.gtf
+gencode_gtf: "resources/annotation/gencode.v47.annotation.gtf"
+
+# Optional: Full transcript FASTA extracted from GTF
+# If not provided, will be extracted from genome (requires genome FASTA)
+# If provided, uses this directly (faster)
+gencode_fasta: "resources/transcripts/gencode.v47.transcripts.fa"
+
+# ============================================================================
+# Classification mode: choose ONE
+# ============================================================================
+
+# Method for classifying transcripts:
+# "fasta" : Separate FASTA files for pc vs lncRNA
+# "id_file" : Text files with transcript IDs per class
+classification_mode: "fasta"  # Change to "id_file" if using ID files
+
+# ============================================================================
+# Option A: FASTA-based classification
+# ============================================================================
+
+# Use these if classification_mode: "fasta"
+# Provide separate FASTA files for coding and lncRNA transcripts
+
+pc_transcripts_fasta: "resources/transcripts/gencode.v47.pc_transcripts.fa"
+lncrna_transcripts_fasta: "resources/transcripts/gencode.v47.lncRNA_transcripts.fa"
+
+# ============================================================================
+# Option B: ID file-based classification
+# ============================================================================
+
+# Use these if classification_mode: "id_file"
+# Simple text files with transcript IDs (one per line, without .version)
+
+pc_transcript_ids_file: "resources/ids/pc_transcript_ids.txt"
+lncrna_transcript_ids_file: "resources/ids/lncrna_transcript_ids.txt"
+
+# ============================================================================
+# RepeatMasker settings
+# ============================================================================
+
+repeatmasker_species: "human"
+repeatmasker_lib: "dfam"
+
+# ============================================================================
+# Feature extraction settings
+# ============================================================================
+
+min_overlap_length: 10
+
+divergence_thresholds:
+  young: 5
+  medium: 15
+  ancient: 15
+
+# ============================================================================
+# Statistical analysis settings
+# ============================================================================
+
+alpha: 0.05
+correction_method: "fdr_bh"
+
+# ============================================================================
+# Visualization settings
+# ============================================================================
+
+figure_dpi: 300
+figure_format: "png"
+
+colors:
+  coding: "steelblue"
+  lncrna: "coral"
+
+# ============================================================================
+# Advanced
+# ============================================================================
+
+random_seed: 42
+n_pca_components: 10
+
+random_forest:
+  n_estimators: 100
+  max_depth: 10
+  cv_folds: 5
+
+# ============================================================================
+# Workflow notes
+# ============================================================================
+
+# This flexible pipeline:
+# 1. Parses GENCODE GTF to get all transcripts and biotypes
+# 2. Extracts transcript sequences if not provided
+# 3. Runs RepeatMasker on FULL database
+# 4. Extracts TE features for ALL transcripts
+# 5. Filters features by classification (pc vs lncRNA)
+# 6. Performs statistical analysis on classified subset
+#
+# Advantages:
+# - Can analyze features from context of full database
+# - Biotypes tracked for each transcript
+# - Flexible classification (FASTA or ID files)
+# - Can extend to other transcript types later

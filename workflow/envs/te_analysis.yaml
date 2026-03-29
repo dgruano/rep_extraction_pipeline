@@ -1,0 +1,19 @@
+name: te_analysis
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - scipy
+  - matplotlib
+  - numpy
+  - scikit-learn
+  - seaborn
+  - pandas
+  - samtools
+  - bedtools
+  - tqdm
+  - intervaltree
+  - ipykernel
+  - biopython
+  - repeatmasker
