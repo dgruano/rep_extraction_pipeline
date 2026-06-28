@@ -67,18 +67,16 @@ class OutFileLoader:
         """Load RepeatMasker .out file."""
         logger.info(f"Loading .out format from {filepath}")
 
-        # Read file and find data start
-        with open(filepath, "r") as f:
-            lines = f.readlines()
-
+        # Read file and find data start (stream instead of readlines to avoid loading GB into RAM)
         data_start = 0
-        for i, line in enumerate(lines):
-            if line.strip() and not line.startswith(" ") and "SW" not in line:
-                data_start = i + 1
-                break
-            if "ID" in line:
-                data_start = i + 2
-                break
+        with open(filepath, "r") as f:
+            for i, line in enumerate(f):
+                if line.strip() and not line.startswith(" ") and "SW" not in line:
+                    data_start = i + 1
+                    break
+                if "ID" in line:
+                    data_start = i + 2
+                    break
 
         # Column names for RepeatMasker .out format
         col_names = [
@@ -186,57 +184,40 @@ class OverlapFilter:
         group_col: str = "transcript_id",
         start_col: str = "start",
         end_col: str = "end",
-        extended_output: bool = True,
+        extended_output: bool = True,  # kept for API compat; ignored — always minimal output
     ) -> pd.DataFrame:
         """
         Find all pairwise overlapping intervals within groups using sweep-line algorithm.
 
-        Parameters
-        ----------
-        rm_hits : pd.DataFrame
-            RepeatMasker hits DataFrame
-        group_col : str
-            Column to group by (default: 'transcript_id')
-        start_col : str
-            Start coordinate column (default: 'start')
-        end_col : str
-            End coordinate column (default: 'end')
-        extended_output : bool
-            If True, include all columns from both overlapping hits
+        Returns a DataFrame with overlapping pairs containing:
+            group_col, overlap_start, overlap_end, overlap_length, index_1, index_2
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with overlapping pairs, containing:
-            - overlap_start, overlap_end, overlap_length
-            - index_1, index_2 (original DataFrame indices)
-            - All columns from rm_hits with _1 and _2 suffixes (if extended_output=True)
+        Needed columns (asterisk, sw_score, hit_length) are looked up from rm_hits
+        in filter_overlapping_hits() to avoid duplicating all columns here, which
+        caused OOM on datasets with tens of millions of overlapping pairs.
         """
-        overlaps = []
+        # ponytail: columnar lists instead of list-of-dicts — ~10x less RAM per pair
+        col_vals: list = []
+        ov_starts: list = []
+        ov_ends: list = []
+        ov_lengths: list = []
+        idx1_list: list = []
+        idx2_list: list = []
 
         for group_name, group_df in rm_hits.groupby(
             group_col, observed=True, sort=False
         ):
-            # Sort by start for sweep-line algorithm
             group_df = group_df.sort_values(start_col).reset_index(drop=False)
             orig_indices = group_df["index"].values
-
             starts = group_df[start_col].values
             ends = group_df[end_col].values
             n = len(starts)
 
-            other_cols = [
-                col for col in group_df.columns if col not in [group_col, "index"]
-            ]
-
-            # Sweep-line algorithm with early termination
             for i in range(n - 1):
                 start1, end1 = starts[i], ends[i]
 
                 for j in range(i + 1, n):
                     start2 = starts[j]
-
-                    # Early termination: no more overlaps possible
                     if start2 > end1:
                         break
 
@@ -245,24 +226,23 @@ class OverlapFilter:
                     overlap_end = min(end1, end2)
 
                     if overlap_start <= overlap_end:
-                        # Build overlap record with columns from both hits
-                        overlap_record = {
-                            group_col: group_name,
-                            "overlap_start": overlap_start,
-                            "overlap_end": overlap_end,
-                            "overlap_length": overlap_end - overlap_start,
-                            "index_1": orig_indices[i],
-                            "index_2": orig_indices[j],
-                        }
+                        col_vals.append(group_name)
+                        ov_starts.append(int(overlap_start))
+                        ov_ends.append(int(overlap_end))
+                        ov_lengths.append(int(overlap_end - overlap_start))
+                        idx1_list.append(int(orig_indices[i]))
+                        idx2_list.append(int(orig_indices[j]))
 
-                        if extended_output:
-                            for col in other_cols:
-                                overlap_record[f"{col}_1"] = group_df.at[i, col]
-                                overlap_record[f"{col}_2"] = group_df.at[j, col]
-
-                        overlaps.append(overlap_record)
-
-        return pd.DataFrame(overlaps)
+        return pd.DataFrame(
+            {
+                group_col: col_vals,
+                "overlap_start": ov_starts,
+                "overlap_end": ov_ends,
+                "overlap_length": ov_lengths,
+                "index_1": idx1_list,
+                "index_2": idx2_list,
+            }
+        )
 
     @staticmethod
     def filter_overlapping_hits(
@@ -276,18 +256,6 @@ class OverlapFilter:
         2. Keep hit with higher SW score
         3. Keep hit with lower overlap percentage (more unique)
         4. Default: remove index_2
-
-        Parameters
-        ----------
-        rm_hits : pd.DataFrame
-            RepeatMasker hits DataFrame
-        overlaps : pd.DataFrame
-            Overlapping pairs from find_overlapping_hits()
-
-        Returns
-        -------
-        pd.DataFrame
-            Filtered rm_hits with overlapping duplicates removed
         """
         if overlaps.empty:
             logger.info("No overlapping TE hits found.")
@@ -296,48 +264,44 @@ class OverlapFilter:
         logger.info(f"Found {len(overlaps)} overlapping TE hit pairs.")
 
         indices_to_remove = set()
+        idx1 = overlaps["index_1"].values
+        idx2 = overlaps["index_2"].values
+
+        # Look up needed columns from rm_hits by original index label
+        asterisk_1 = rm_hits["asterisk"].loc[idx1].values
+        asterisk_2 = rm_hits["asterisk"].loc[idx2].values
+        sw_score_1 = rm_hits["sw_score"].loc[idx1].values
+        sw_score_2 = rm_hits["sw_score"].loc[idx2].values
+        hit_length_1 = rm_hits["hit_length"].loc[idx1].values
+        hit_length_2 = rm_hits["hit_length"].loc[idx2].values
 
         # Rule 0: Remove hits with asterisk
-        mask_1_has_asterisk = overlaps["asterisk_1"].notna()
-        mask_2_has_asterisk = overlaps["asterisk_2"].notna()
+        mask_1_has_asterisk = pd.notna(asterisk_1)
+        mask_2_has_asterisk = pd.notna(asterisk_2)
         indices_to_remove.update(overlaps.loc[mask_1_has_asterisk, "index_1"].tolist())
         indices_to_remove.update(overlaps.loc[mask_2_has_asterisk, "index_2"].tolist())
 
         # Rule 1: Keep higher SW score (only when neither has asterisk)
         mask_no_asterisk = ~(mask_1_has_asterisk | mask_2_has_asterisk)
-        mask_score_1_lower = mask_no_asterisk & (
-            overlaps["sw_score_1"] < overlaps["sw_score_2"]
-        )
-        mask_score_2_lower = mask_no_asterisk & (
-            overlaps["sw_score_2"] < overlaps["sw_score_1"]
-        )
+        mask_score_1_lower = mask_no_asterisk & (sw_score_1 < sw_score_2)
+        mask_score_2_lower = mask_no_asterisk & (sw_score_2 < sw_score_1)
         indices_to_remove.update(overlaps.loc[mask_score_1_lower, "index_1"].tolist())
         indices_to_remove.update(overlaps.loc[mask_score_2_lower, "index_2"].tolist())
 
         # Rule 2: Keep hit with lower overlap percentage (when scores equal)
-        overlaps["perc_1"] = (
-            overlaps["overlap_length"] / overlaps["hit_length_1"]
-        ) * 100
-        overlaps["perc_2"] = (
-            overlaps["overlap_length"] / overlaps["hit_length_2"]
-        ) * 100
-        mask_equal_score = mask_no_asterisk & (
-            overlaps["sw_score_1"] == overlaps["sw_score_2"]
-        )
-        mask_perc_1_higher = mask_equal_score & (
-            overlaps["perc_1"] > overlaps["perc_2"]
-        )
-        mask_perc_2_higher = mask_equal_score & (
-            overlaps["perc_2"] > overlaps["perc_1"]
-        )
+        ov_len = overlaps["overlap_length"].values
+        perc_1 = (ov_len / hit_length_1) * 100
+        perc_2 = (ov_len / hit_length_2) * 100
+        mask_equal_score = mask_no_asterisk & (sw_score_1 == sw_score_2)
+        mask_perc_1_higher = mask_equal_score & (perc_1 > perc_2)
+        mask_perc_2_higher = mask_equal_score & (perc_2 > perc_1)
         indices_to_remove.update(overlaps.loc[mask_perc_1_higher, "index_1"].tolist())
         indices_to_remove.update(overlaps.loc[mask_perc_2_higher, "index_2"].tolist())
 
         # Rule 3: Default removal (equal everything)
-        mask_remaining = mask_equal_score & (overlaps["perc_1"] == overlaps["perc_2"])
+        mask_remaining = mask_equal_score & (perc_1 == perc_2)
         indices_to_remove.update(overlaps.loc[mask_remaining, "index_2"].tolist())
 
-        # Log statistics
         logger.info(
             f"Pairs with asterisk: {(mask_1_has_asterisk | mask_2_has_asterisk).sum()}"
         )
@@ -349,7 +313,6 @@ class OverlapFilter:
         )
         logger.info(f"Total unique indices to remove: {len(indices_to_remove)}")
 
-        # Remove identified indices
         filtered = rm_hits.drop(index=list(indices_to_remove)).reset_index(drop=True)
         logger.info(f"Retained {len(filtered)}/{len(rm_hits)} hits after filtering")
 
