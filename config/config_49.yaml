@@ -9,7 +9,7 @@
 # ============================================================================
 
 output_dir: "results/gencode.v49"
-threads: 56
+threads: 28
 datasets:
   - "gencode.v49"
 
@@ -28,6 +28,14 @@ gencode_gtf: "resources/annotation/gencode.v49.chr_patch_hapl_scaff.annotation.g
 # If not provided, will be extracted from genome (requires genome FASTA)
 # If provided, uses this directly (faster)
 gencode_fasta: "resources/transcripts/gencode.v49.transcripts.fa"
+
+# Sequence mode for RepeatMasker input:
+#   "spliced"   - use exonic sequences from gencode_fasta (default)
+#   "unspliced" - extract full genomic span (TSS→TES, introns included) via bedtools getfasta
+sequence_mode: "spliced"
+
+# Required only for sequence_mode: "unspliced"
+genome_fasta: ""  # e.g. "resources/genome/GRCh38.primary_assembly.genome.fa"
 
 # ============================================================================
 # Classification mode: choose ONE

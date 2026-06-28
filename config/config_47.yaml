@@ -8,8 +8,10 @@
 # General settings
 # ============================================================================
 
-output_dir: "results/gencode.v47"
 threads: 20
+# Number of FASTA chunks for parallel RepeatMasker. Set to 1 to disable chunking.
+# Each chunk runs with `threads` cores, so total = n_chunks * threads on a cluster.
+n_chunks: 5
 datasets:
   - "gencode.v47"
 
@@ -26,6 +28,14 @@ gencode_gtf: "resources/annotation/gencode.v47.annotation.gtf"
 # If not provided, will be extracted from genome (requires genome FASTA)
 # If provided, uses this directly (faster)
 gencode_fasta: "resources/transcripts/gencode.v47.transcripts.fa"
+
+# Sequence mode for RepeatMasker input:
+#   "spliced"   - use exonic sequences from gencode_fasta (default)
+#   "unspliced" - extract full genomic span (TSS→TES, introns included) via bedtools getfasta
+sequence_mode: "spliced"
+
+# Required only for sequence_mode: "unspliced"
+genome_fasta: "resources/genome/GRCh38.primary_assembly.genome.fa"  # e.g. "resources/genome/GRCh38.primary_assembly.genome.fa"
 
 # ============================================================================
 # Classification mode: choose ONE
