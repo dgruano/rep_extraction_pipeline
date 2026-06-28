@@ -145,8 +145,10 @@ class OutFileLoader:
         # Calculate hit length
         rm_hits["hit_length"] = rm_hits["end"] - rm_hits["start"] + 1
 
-        # Normalize transcript ID (remove version if present)
-        # rm_hits['transcript_id'] = rm_hits['transcript_id'].str.split('.').str[0]
+        # Strip strand suffix embedded in sequence name by bedtools getfasta (e.g. ENST00000832824.1(+) -> ENST00000832824.1)
+        rm_hits["transcript_id"] = rm_hits["transcript_id"].str.replace(
+            r"\([+-]\)$", "", regex=True
+        )
 
         return rm_hits
 
