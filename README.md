@@ -35,6 +35,23 @@ Set `classification_mode` in the config to one of:
 | `fasta` | `pc_transcripts_fasta`, `lncrna_transcripts_fasta` |
 | `id_file` | `pc_transcript_ids_file`, `lncrna_transcript_ids_file` |
 
+## Sequence modes
+
+Set `sequence_mode` in the config to choose what sequences RepeatMasker runs on:
+
+| Mode | Sequences | Required keys |
+|------|-----------|--------------|
+| `spliced` (default) | Exonic sequence only (mature transcript) | `gencode_fasta` |
+| `unspliced` | Full genomic span TSS→TES, introns included | `genome_fasta` |
+
+In `unspliced` mode the pipeline extracts coordinates directly from the GTF `transcript` features and runs `bedtools getfasta` on the genome. Transcript lengths used for feature normalisation are adjusted to the genomic span accordingly.
+
+```yaml
+# config snippet for unspliced mode
+sequence_mode: "unspliced"
+genome_fasta: "resources/genome/GRCh38.primary_assembly.genome.fa"
+```
+
 ## Pipeline steps
 
 | Step | Rule | Output |
@@ -42,8 +59,9 @@ Set `classification_mode` in the config to one of:
 | 1 | `parse_gencode_gtf` | `annotation/transcripts_from_gtf.bed`, `transcript_biotypes.txt` |
 | 1.5 | `extract_transcript_lengths` | `annotation/transcript_lengths.txt` |
 | 2 | `extract_ids_from_fasta` | `annotation/pc_transcript_ids.txt`, `lncrna_transcript_ids.txt` |
-| 4 | `index_transcripts` | `annotation/all_transcripts.fa.fai` |
-| 5 | `check_fasta_headers` | `annotation/all_transcripts_headers_checked.fa` |
+| 2.5 | `prepare_transcript_fasta` | `annotation/all_transcripts.fa` |
+| 3 | `index_transcripts` | `annotation/all_transcripts.fa.fai` |
+| 4 | `check_fasta_headers` | `annotation/all_transcripts_headers_checked.fa` |
 | 5 | `run_repeatmasker_full` | `repeatmasker/all_transcripts.out{,.gff}` |
 | 6 | `extract_all_features` | `features/all_transcripts_te_features.csv` |
 | 7 | `filter_features_by_class` | `features/{pc,lncrna}_transcripts_te_features.csv` |

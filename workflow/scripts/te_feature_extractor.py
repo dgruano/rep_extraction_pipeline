@@ -375,7 +375,7 @@ class RepeatMaskerProcessor:
         transcripts : pd.DataFrame
             Transcript coordinates with 'transcript_id' and 'length' columns
         """
-        self.rm_hits = rm_hits.copy()
+        self.rm_hits = rm_hits  # ponytail: no copy — processors only filter, never mutate self.rm_hits
         self.transcripts = transcripts
 
     @staticmethod
@@ -455,8 +455,6 @@ class RepeatMaskerProcessor:
         pd.DataFrame
             Input DataFrame with gap_before and gap_after columns added
         """
-        df = df.copy()
-
         # Convert query_left to numeric
         if df["query_left"].dtype == object:
             df["query_left_num"] = (
